@@ -123,41 +123,151 @@ public class InAppPurchasePlugin: NSObject, FlutterPlugin, InAppPurchaseAPI {
     _ productIdentifiers: [String],
     completion: @escaping (SKProductsResponseMessage?, FlutterError?) -> Void
   ) {
-    let request = getProductRequest(withIdentifiers: Set(productIdentifiers))
-    let handler = handlerFactory(request)
-    requestHandlers.add(handler)
+    if #available(iOS 15.0, macOS 13.0, *) {
+      Task {
+        do {
+          let products = try await Product.products(for: Set(productIdentifiers))
 
-    handler.startProductRequest { [weak self] response, startProductRequestError in
-      guard let self = self else { return }
-      if let startProductRequestError = startProductRequestError {
-        let error = FlutterError(
-          code: "storekit_getproductrequest_platform_error",
-          message: startProductRequestError.localizedDescription,
-          details: startProductRequestError.localizedDescription)
-        completion(nil, error)
-        return
-      }
+          // Create SKProductsResponseMessage directly
+          let responseMessage = SKProductsResponseMessage()
 
-      guard let response = response else {
-        let error = FlutterError(
-          code: "storekit_platform_no_response",
-          message:
-            "Failed to get SKProductResponse in startRequest call. Error occurred on iOS platform",
-          details: productIdentifiers)
-        completion(nil, error)
-        return
-      }
+          responseMessage.products = try products.compactMap { product in
+            guard let currency = product.priceFormatStyle.locale.currency,
+              let currencySymbol = product.priceFormatStyle.locale.currencySymbol,
+              let region = product.priceFormatStyle.locale.region
+            else {
+              return nil
+            }
 
-      for product in response.products {
-        self.productsCache[product.productIdentifier] = product
-      }
+            let subscriptionPeriod: SKProductSubscriptionPeriodMessage?
+            let introductoryOffer: SKProductDiscountMessage?
+            let discounts: [SKProductDiscountMessage]?
 
-      if #available(iOS 12.2, *) {
-        if let responseMessage = FIAObjectTranslator.convertProductsResponse(toPigeon: response) {
+            if let subscription = product.subscription {
+              subscriptionPeriod = SKProductSubscriptionPeriodMessage.make(
+                withNumberOfUnits: subscription.subscriptionPeriod.value,
+                unit: try convertSubscriptionPeriodUnit(subscription.subscriptionPeriod.unit))
+
+              // Convert introductory offer if available
+              if let intro = subscription.introductoryOffer {
+                introductoryOffer = SKProductDiscountMessage.make(
+                  withPrice: intro.price.formatted(),
+                  priceLocale: SKPriceLocaleMessage.make(
+                    withCurrencySymbol: currencySymbol,
+                    currencyCode: currency.identifier,
+                    countryCode: region.identifier
+                  ),
+                  numberOfPeriods: intro.period.value,
+                  paymentMode: try convertPaymentMode(intro.paymentMode),
+                  subscriptionPeriod: SKProductSubscriptionPeriodMessage.make(
+                    withNumberOfUnits: intro.period.value,
+                    unit: try convertSubscriptionPeriodUnit(intro.period.unit)
+                  ),
+                  identifier: intro.id,
+                  type: .introductory
+                )
+              } else {
+                introductoryOffer = nil
+              }
+
+              // Convert promotional offers if available
+              discounts = try subscription.promotionalOffers.map { offer in
+                SKProductDiscountMessage.make(
+                  withPrice: offer.price.formatted(),
+                  priceLocale: SKPriceLocaleMessage.make(
+                    withCurrencySymbol: currencySymbol,
+                    currencyCode: currency.identifier,
+                    countryCode: region.identifier
+                  ),
+                  numberOfPeriods: offer.period.value,
+                  paymentMode: try convertPaymentMode(offer.paymentMode),
+                  subscriptionPeriod: SKProductSubscriptionPeriodMessage.make(
+                    withNumberOfUnits: offer.period.value,
+                    unit: try convertSubscriptionPeriodUnit(offer.period.unit)
+                  ),
+                  identifier: offer.id,
+                  type: .subscription)
+              }
+            } else {
+              subscriptionPeriod = nil
+              introductoryOffer = nil
+              discounts = nil
+            }
+
+            let skProduct = SKProductMessage.make(
+              withProductIdentifier: product.id,
+              localizedTitle: product.displayName,
+              localizedDescription: product.description,
+              priceLocale: SKPriceLocaleMessage.make(
+                withCurrencySymbol: currencySymbol,
+                currencyCode: currency.identifier,
+                countryCode: region.identifier
+              ),
+              subscriptionGroupIdentifier: product.subscription?.subscriptionGroupID,
+              price: product.price.formatted(),
+              subscriptionPeriod: subscriptionPeriod,
+              introductoryPrice: introductoryOffer,
+              discounts: discounts)
+
+            // Store original product in cache for future use
+            // We need to store it as Product type since we can't convert to SKProduct
+            self.productsCache[product.id] = product
+            return skProduct
+          }
+
+          // Handle invalid product identifiers
+          let validIds = Set(products.map { $0.id })
+          responseMessage.invalidProductIdentifiers = productIdentifiers.filter {
+            !validIds.contains($0)
+          }
+
           completion(responseMessage, nil)
+        } catch {
+          let flutterError = FlutterError(
+            code: "storekit_getproductrequest_platform_error",
+            message: error.localizedDescription,
+            details: error.localizedDescription)
+          completion(nil, flutterError)
         }
       }
-      self.requestHandlers.remove(handler)
+    } else {
+      // Fall back to old SKProductsRequest API for older OS versions
+      let request = getProductRequest(withIdentifiers: Set(productIdentifiers))
+      let handler = handlerFactory(request)
+      requestHandlers.add(handler)
+
+      handler.startProductRequest { [weak self] response, startProductRequestError in
+        guard let self = self else { return }
+        if let startProductRequestError = startProductRequestError {
+          let error = FlutterError(
+            code: "storekit_getproductrequest_platform_error",
+            message: startProductRequestError.localizedDescription,
+            details: startProductRequestError.localizedDescription)
+          completion(nil, error)
+          return
+        }
+
+        guard let response = response else {
+          let error = FlutterError(
+            code: "storekit_platform_no_response",
+            message:
+              "Failed to get SKProductResponse in startRequest call. Error occurred on iOS platform",
+            details: productIdentifiers)
+          completion(nil, error)
+          return
+        }
+
+        for product in response.products {
+          self.productsCache[product.productIdentifier] = product
+        }
+
+        if #available(iOS 12.2, *) {
+          if let responseMessage = FIAObjectTranslator.convertProductsResponse(toPigeon: response) {
+            completion(responseMessage, nil)
+          }
+        }
+        self.requestHandlers.remove(handler)
+      }
     }
   }
 
@@ -222,7 +332,7 @@ public class InAppPurchasePlugin: NSObject, FlutterPlugin, InAppPurchaseAPI {
 
     // TODO(louisehsu): This is a workaround for objc pigeon's NSNull support. Once we move to swift pigeon, this can be removed.
     let castedFinishMap: [String: String] = finishMap.compactMapValues { value in
-      if let _ = value as? NSNull {
+      if value as? NSNull != nil {
         return nil
       } else if let stringValue = value as? String {
         return stringValue
@@ -432,5 +542,47 @@ public class InAppPurchasePlugin: NSObject, FlutterPlugin, InAppPurchaseAPI {
         binaryMessenger: messenger
       )
     )
+  }
+
+  @available(macOS 12.0, *)
+  private func convertPaymentMode(_ mode: Product.SubscriptionOffer.PaymentMode) throws
+    -> SKProductDiscountPaymentModeMessage
+  {
+    switch mode {
+    case .payAsYouGo:
+      return .payAsYouGo
+    case .payUpFront:
+      return .payUpFront
+    case .freeTrial:
+      return .freeTrial
+    default:
+      throw NSError(
+        domain: "InAppPurchasePlugin",
+        code: 0,
+        userInfo: [NSLocalizedDescriptionKey: "Unknown payment mode: \(mode)"]
+      )
+    }
+  }
+
+  @available(macOS 12.0, *)
+  private func convertSubscriptionPeriodUnit(_ unit: Product.SubscriptionPeriod.Unit) throws
+    -> SKSubscriptionPeriodUnitMessage
+  {
+    switch unit {
+    case .day:
+      return .day
+    case .week:
+      return .week
+    case .month:
+      return .month
+    case .year:
+      return .year
+    @unknown default:
+      throw NSError(
+        domain: "InAppPurchasePlugin",
+        code: 0,
+        userInfo: [NSLocalizedDescriptionKey: "Unknown subscription period unit: \(unit)"]
+      )
+    }
   }
 }
