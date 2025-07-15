@@ -25,17 +25,17 @@ dependencies:
     git:
       url: https://github.com/isaacy13/packages-themedeck.git
       path: packages/in_app_purchase/in_app_purchase_android
-      ref: remote-hotfix
+      ref: remote-hotfix-sk1
   in_app_purchase_platform_interface:
     git:
       url: https://github.com/isaacy13/packages-themedeck.git
       path: packages/in_app_purchase/in_app_purchase_platform_interface
-      ref: remote-hotfix
+      ref: remote-hotfix-sk1
   in_app_purchase_storekit:
     git:
       url: https://github.com/isaacy13/packages-themedeck.git
       path: packages/in_app_purchase/in_app_purchase_storekit
-      ref: remote-hotfix
+      ref: remote-hotfix-sk1
 
 dev_dependencies:
   flutter_test:
